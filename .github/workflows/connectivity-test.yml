@@ -1,0 +1,148 @@
+name: Connectivity Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'prod'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      location:
+        description: 'Azure region'
+        required: true
+        default: 'eastus'
+        type: choice
+        options:
+          - eastus
+          - eastus2
+          - westus2
+
+jobs:
+  test:
+    name: Run Connectivity Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Test Spoke1 to Spoke2
+        id: test-spoke1-spoke2
+        run: |
+          ENV="${{ inputs.environment }}"
+          LOC="${{ inputs.location }}"
+
+          SPOKE1_RG="rg-spoke1-${ENV}-${LOC}-001"
+          SPOKE2_RG="rg-spoke2-${ENV}-${LOC}-001"
+
+          # Get source VM
+          SOURCE_VM=$(az vm list -g $SPOKE1_RG --query "[0].name" -o tsv)
+
+          # Get destination IP
+          DEST_IP=$(az vm list-ip-addresses -g $SPOKE2_RG \
+            --query "[0].virtualMachine.network.privateIpAddresses[0]" -o tsv)
+
+          echo "Testing: $SOURCE_VM -> $DEST_IP"
+
+          RESULT=$(az network watcher test-connectivity \
+            -g $SPOKE1_RG \
+            --source-resource $SOURCE_VM \
+            --dest-address $DEST_IP \
+            --dest-port 22 \
+            --query "{status:connectionStatus, latency:avgLatencyInMs}" -o json)
+
+          STATUS=$(echo $RESULT | jq -r '.status')
+          LATENCY=$(echo $RESULT | jq -r '.latency')
+
+          echo "spoke1_spoke2_status=$STATUS" >> $GITHUB_OUTPUT
+          echo "spoke1_spoke2_latency=$LATENCY" >> $GITHUB_OUTPUT
+
+      - name: Test Spoke2 to Spoke1
+        id: test-spoke2-spoke1
+        run: |
+          ENV="${{ inputs.environment }}"
+          LOC="${{ inputs.location }}"
+
+          SPOKE1_RG="rg-spoke1-${ENV}-${LOC}-001"
+          SPOKE2_RG="rg-spoke2-${ENV}-${LOC}-001"
+
+          # Get source VM
+          SOURCE_VM=$(az vm list -g $SPOKE2_RG --query "[0].name" -o tsv)
+
+          # Get destination IP
+          DEST_IP=$(az vm list-ip-addresses -g $SPOKE1_RG \
+            --query "[0].virtualMachine.network.privateIpAddresses[0]" -o tsv)
+
+          echo "Testing: $SOURCE_VM -> $DEST_IP"
+
+          RESULT=$(az network watcher test-connectivity \
+            -g $SPOKE2_RG \
+            --source-resource $SOURCE_VM \
+            --dest-address $DEST_IP \
+            --dest-port 22 \
+            --query "{status:connectionStatus, latency:avgLatencyInMs}" -o json)
+
+          STATUS=$(echo $RESULT | jq -r '.status')
+          LATENCY=$(echo $RESULT | jq -r '.latency')
+
+          echo "spoke2_spoke1_status=$STATUS" >> $GITHUB_OUTPUT
+          echo "spoke2_spoke1_latency=$LATENCY" >> $GITHUB_OUTPUT
+
+      - name: Test Spoke1 to Hub (Firewall)
+        id: test-spoke1-hub
+        run: |
+          ENV="${{ inputs.environment }}"
+          LOC="${{ inputs.location }}"
+
+          SPOKE1_RG="rg-spoke1-${ENV}-${LOC}-001"
+          HUB_RG="rg-hub-networking-${ENV}-${LOC}-001"
+
+          # Get source VM
+          SOURCE_VM=$(az vm list -g $SPOKE1_RG --query "[0].name" -o tsv)
+
+          # Get firewall IP
+          FW_IP=$(az network firewall show -g $HUB_RG -n "fw-hub-${ENV}-${LOC}-001" \
+            --query "ipConfigurations[0].privateIPAddress" -o tsv)
+
+          echo "Testing: $SOURCE_VM -> $FW_IP (Firewall)"
+
+          RESULT=$(az network watcher test-connectivity \
+            -g $SPOKE1_RG \
+            --source-resource $SOURCE_VM \
+            --dest-address $FW_IP \
+            --dest-port 443 \
+            --query "{status:connectionStatus, latency:avgLatencyInMs}" -o json)
+
+          STATUS=$(echo $RESULT | jq -r '.status')
+          LATENCY=$(echo $RESULT | jq -r '.latency')
+
+          echo "spoke1_hub_status=$STATUS" >> $GITHUB_OUTPUT
+          echo "spoke1_hub_latency=$LATENCY" >> $GITHUB_OUTPUT
+
+      - name: Generate Test Report
+        run: |
+          echo "## Connectivity Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Test | Status | Latency |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|---------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Spoke1 -> Spoke2 | ${{ steps.test-spoke1-spoke2.outputs.spoke1_spoke2_status }} | ${{ steps.test-spoke1-spoke2.outputs.spoke1_spoke2_latency }}ms |" >> $GITHUB_STEP_SUMMARY
+          echo "| Spoke2 -> Spoke1 | ${{ steps.test-spoke2-spoke1.outputs.spoke2_spoke1_status }} | ${{ steps.test-spoke2-spoke1.outputs.spoke2_spoke1_latency }}ms |" >> $GITHUB_STEP_SUMMARY
+          echo "| Spoke1 -> Hub | ${{ steps.test-spoke1-hub.outputs.spoke1_hub_status }} | ${{ steps.test-spoke1-hub.outputs.spoke1_hub_latency }}ms |" >> $GITHUB_STEP_SUMMARY
+
+          # Check for failures
+          if [ "${{ steps.test-spoke1-spoke2.outputs.spoke1_spoke2_status }}" != "Reachable" ] || \
+             [ "${{ steps.test-spoke2-spoke1.outputs.spoke2_spoke1_status }}" != "Reachable" ] || \
+             [ "${{ steps.test-spoke1-hub.outputs.spoke1_hub_status }}" != "Reachable" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**SOME TESTS FAILED - Check connectivity configuration**" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**All connectivity tests passed!**" >> $GITHUB_STEP_SUMMARY
