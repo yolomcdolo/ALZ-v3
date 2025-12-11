@@ -1,0 +1,88 @@
+{
+    "displayName": "Cloudflare Zero Trust Access",
+    "description": "OIDC integration for Cloudflare Zero Trust Access - enables SSO authentication for protected applications via fortbox.cloudflareaccess.com",
+    "signInAudience": "AzureADMyOrg",
+    "web": {
+        "redirectUris": [
+            "https://fortbox.cloudflareaccess.com/cdn-cgi/access/callback"
+        ],
+        "implicitGrantSettings": {
+            "enableAccessTokenIssuance": false,
+            "enableIdTokenIssuance": true
+        }
+    },
+    "requiredResourceAccess": [
+        {
+            "resourceAppId": "00000003-0000-0000-c000-000000000000",
+            "resourceAccess": [
+                {
+                    "id": "e1fe6dd8-ba31-4d61-89e7-88639da4683d",
+                    "type": "Scope",
+                    "description": "email"
+                },
+                {
+                    "id": "7427e0e9-2fba-42fe-b0c0-848c9e6a8182",
+                    "type": "Scope",
+                    "description": "offline_access"
+                },
+                {
+                    "id": "37f7f235-527c-4136-accd-4a02d197296e",
+                    "type": "Scope",
+                    "description": "openid"
+                },
+                {
+                    "id": "14dad69e-099b-42c9-810b-d002981feec1",
+                    "type": "Scope",
+                    "description": "profile"
+                },
+                {
+                    "id": "e1fe6dd8-ba31-4d61-89e7-88639da4683d",
+                    "type": "Scope",
+                    "description": "User.Read"
+                },
+                {
+                    "id": "06da0dbc-49e2-44d2-8312-53f166ab848a",
+                    "type": "Scope",
+                    "description": "Directory.Read.All"
+                },
+                {
+                    "id": "bc024368-1153-4739-b217-4326f2e966d0",
+                    "type": "Scope",
+                    "description": "GroupMember.Read.All"
+                }
+            ]
+        }
+    ],
+    "optionalClaims": {
+        "idToken": [
+            {
+                "name": "email",
+                "essential": true
+            },
+            {
+                "name": "upn",
+                "essential": false
+            },
+            {
+                "name": "groups",
+                "essential": false
+            }
+        ],
+        "accessToken": [
+            {
+                "name": "email",
+                "essential": true
+            }
+        ]
+    },
+    "_metadata": {
+        "tenant": "ryanturcotte.com",
+        "cloudflareTeam": "fortbox",
+        "callbackUrl": "https://fortbox.cloudflareaccess.com/cdn-cgi/access/callback",
+        "integrationType": "OIDC",
+        "category": "sso-integration",
+        "owner": "security-team",
+        "lastReviewed": "2024-12-11",
+        "documentation": "https://developers.cloudflare.com/cloudflare-one/identity/idp-integration/entra-id/"
+    }
+}
