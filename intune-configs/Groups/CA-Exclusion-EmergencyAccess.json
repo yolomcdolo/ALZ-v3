@@ -1,0 +1,7 @@
+{
+    "displayName": "CA-Exclusion-EmergencyAccess",
+    "description": "Emergency access accounts excluded from all Conditional Access policies. Contains break-glass accounts for emergency tenant access.",
+    "mailEnabled": false,
+    "securityEnabled": true,
+    "groupTypes": []
+}

@@ -1,0 +1,185 @@
+name: Validate Intune Configuration
+
+on:
+  push:
+    paths:
+      - 'intune-configs/**'
+      - 'scripts/intune/**'
+  pull_request:
+    paths:
+      - 'intune-configs/**'
+      - 'scripts/intune/**'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  validate:
+    name: Validate Configuration Files
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Validate JSON Files
+        id: validate-json
+        shell: pwsh
+        run: |
+          $configPath = "${{ github.workspace }}/intune-configs"
+          $results = @{
+            Valid = @()
+            Invalid = @()
+          }
+
+          if (-not (Test-Path $configPath)) {
+            Write-Host "No intune-configs directory found - skipping validation"
+            exit 0
+          }
+
+          $jsonFiles = Get-ChildItem -Path $configPath -Filter "*.json" -Recurse -ErrorAction SilentlyContinue
+
+          foreach ($file in $jsonFiles) {
+            try {
+              $content = Get-Content $file.FullName -Raw -ErrorAction Stop
+
+              # Handle UTF-16 encoding
+              $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
+              if ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
+                $content = [System.Text.Encoding]::Unicode.GetString($bytes, 2, $bytes.Length - 2)
+              }
+
+              $null = $content | ConvertFrom-Json -ErrorAction Stop
+              $results.Valid += $file.Name
+            }
+            catch {
+              $results.Invalid += @{
+                File = $file.Name
+                Error = $_.Exception.Message
+              }
+            }
+          }
+
+          Write-Host "`n=== Validation Results ===" -ForegroundColor Cyan
+          Write-Host "Valid: $($results.Valid.Count)" -ForegroundColor Green
+          Write-Host "Invalid: $($results.Invalid.Count)" -ForegroundColor $(if ($results.Invalid.Count -gt 0) { "Red" } else { "Green" })
+
+          if ($results.Invalid.Count -gt 0) {
+            Write-Host "`nInvalid Files:" -ForegroundColor Red
+            foreach ($invalid in $results.Invalid) {
+              Write-Host "  - $($invalid.File): $($invalid.Error)" -ForegroundColor Red
+            }
+            echo "status=failed" >> $env:GITHUB_OUTPUT
+            exit 1
+          }
+
+          echo "status=passed" >> $env:GITHUB_OUTPUT
+          echo "valid_count=$($results.Valid.Count)" >> $env:GITHUB_OUTPUT
+
+      - name: Validate Policy Schema
+        id: validate-schema
+        shell: pwsh
+        run: |
+          $configPath = "${{ github.workspace }}/intune-configs"
+          $warnings = @()
+
+          if (-not (Test-Path $configPath)) {
+            exit 0
+          }
+
+          $jsonFiles = Get-ChildItem -Path $configPath -Filter "*.json" -Recurse -ErrorAction SilentlyContinue
+
+          foreach ($file in $jsonFiles) {
+            try {
+              $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
+              if ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
+                $content = [System.Text.Encoding]::Unicode.GetString($bytes, 2, $bytes.Length - 2)
+              }
+              else {
+                $content = Get-Content $file.FullName -Raw
+              }
+
+              $config = $content | ConvertFrom-Json
+
+              # Check for required fields
+              if (-not $config.displayName) {
+                $warnings += "Missing displayName in $($file.Name)"
+              }
+
+              # Check for sensitive data patterns
+              if ($content -match '(?i)(password|secret|key|token)\s*[=:]\s*["\x27][^"\x27]+["\x27]') {
+                $warnings += "Potential sensitive data in $($file.Name)"
+              }
+
+              # Validate Conditional Access policies
+              if ($file.FullName -match 'ConditionalAccess') {
+                if (-not $config.conditions) {
+                  $warnings += "CA policy missing conditions: $($file.Name)"
+                }
+                if (-not ($config.grantControls -or $config.sessionControls)) {
+                  $warnings += "CA policy missing grant/session controls: $($file.Name)"
+                }
+              }
+
+              # Validate Compliance policies
+              if ($file.FullName -match 'CompliancePolicies') {
+                if (-not $config.'@odata.type') {
+                  $warnings += "Compliance policy missing @odata.type: $($file.Name)"
+                }
+              }
+            }
+            catch {
+              # Already caught in JSON validation
+            }
+          }
+
+          if ($warnings.Count -gt 0) {
+            Write-Host "`n=== Schema Warnings ===" -ForegroundColor Yellow
+            foreach ($warning in $warnings) {
+              Write-Host "  - $warning" -ForegroundColor Yellow
+            }
+            echo "warnings=$($warnings.Count)" >> $env:GITHUB_OUTPUT
+          }
+          else {
+            Write-Host "No schema warnings" -ForegroundColor Green
+            echo "warnings=0" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Post Validation Summary
+        run: |
+          echo "## Intune Configuration Validation" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Check | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| JSON Validation | ${{ steps.validate-json.outputs.status }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Valid Files | ${{ steps.validate-json.outputs.valid_count }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Schema Warnings | ${{ steps.validate-schema.outputs.warnings }} |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const status = '${{ steps.validate-json.outputs.status }}';
+            const validCount = '${{ steps.validate-json.outputs.valid_count }}';
+            const warnings = '${{ steps.validate-schema.outputs.warnings }}';
+
+            const emoji = status === 'passed' ? '✅' : '❌';
+            const body = `## ${emoji} Intune Configuration Validation
+
+            | Check | Result |
+            |-------|--------|
+            | JSON Validation | ${status} |
+            | Valid Files | ${validCount} |
+            | Schema Warnings | ${warnings} |
+
+            ${warnings > 0 ? '⚠️ Please review schema warnings in the workflow logs.' : ''}
+            `;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
