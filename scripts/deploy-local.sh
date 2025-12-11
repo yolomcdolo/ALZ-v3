@@ -1,8 +1,33 @@
 #!/bin/bash
 # Local deployment script for ALZ-v3 Hub-Spoke Architecture
 # This script mirrors the GitHub Actions workflow for local execution
+#
+# USAGE:
+#   ./deploy-local.sh [env] [location] [spoke_count] [deploy_vpn] [deploy_bastion] [vm_count_spoke1] [vm_count_spoke2]
+#
+# ENVIRONMENT VARIABLES:
+#   VM_ADMIN_PASSWORD - Required. Password for VM admin accounts.
+#   ALZ_CONFIG_FILE   - Optional. Path to config file (default: ./config/default.yaml)
+#
+# EXAMPLES:
+#   VM_ADMIN_PASSWORD="MySecureP@ss123!" ./deploy-local.sh prod eastus 2 false true 3 2
+#   export VM_ADMIN_PASSWORD="MySecureP@ss123!" && ./deploy-local.sh
 
 set -e
+set -o pipefail
+
+# =============================================================================
+# Color Output
+# =============================================================================
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+error() { echo -e "${RED}ERROR: $1${NC}" >&2; }
+warn() { echo -e "${YELLOW}WARNING: $1${NC}" >&2; }
+success() { echo -e "${GREEN}$1${NC}"; }
+info() { echo "$1"; }
 
 # =============================================================================
 # Configuration
@@ -15,8 +40,120 @@ DEPLOY_BASTION="${5:-true}"
 VM_COUNT_SPOKE1="${6:-4}"
 VM_COUNT_SPOKE2="${7:-2}"
 
+# =============================================================================
+# Input Validation
+# =============================================================================
+validate_inputs() {
+    local errors=0
+
+    # Validate environment
+    case "$ENV" in
+        dev|staging|prod) ;;
+        *)
+            error "Invalid environment: $ENV. Must be one of: dev, staging, prod"
+            errors=$((errors + 1))
+            ;;
+    esac
+
+    # Validate location
+    VALID_LOCATIONS="eastus eastus2 westus westus2 centralus northeurope westeurope"
+    if ! echo "$VALID_LOCATIONS" | grep -qw "$LOCATION"; then
+        error "Invalid location: $LOCATION. Valid: $VALID_LOCATIONS"
+        errors=$((errors + 1))
+    fi
+
+    # Validate spoke count
+    if ! [[ "$SPOKE_COUNT" =~ ^[2-5]$ ]]; then
+        error "Invalid spoke count: $SPOKE_COUNT. Must be 2-5"
+        errors=$((errors + 1))
+    fi
+
+    # Validate boolean inputs
+    case "$DEPLOY_VPN" in
+        true|false) ;;
+        *)
+            error "Invalid deploy_vpn: $DEPLOY_VPN. Must be true or false"
+            errors=$((errors + 1))
+            ;;
+    esac
+
+    case "$DEPLOY_BASTION" in
+        true|false) ;;
+        *)
+            error "Invalid deploy_bastion: $DEPLOY_BASTION. Must be true or false"
+            errors=$((errors + 1))
+            ;;
+    esac
+
+    # Validate VM counts
+    if ! [[ "$VM_COUNT_SPOKE1" =~ ^[0-9]+$ ]] || [ "$VM_COUNT_SPOKE1" -gt 10 ]; then
+        error "Invalid vm_count_spoke1: $VM_COUNT_SPOKE1. Must be 0-10"
+        errors=$((errors + 1))
+    fi
+
+    if ! [[ "$VM_COUNT_SPOKE2" =~ ^[0-9]+$ ]] || [ "$VM_COUNT_SPOKE2" -gt 10 ]; then
+        error "Invalid vm_count_spoke2: $VM_COUNT_SPOKE2. Must be 0-10"
+        errors=$((errors + 1))
+    fi
+
+    # CRITICAL: Validate VM_ADMIN_PASSWORD
+    if [ -z "$VM_ADMIN_PASSWORD" ]; then
+        error "VM_ADMIN_PASSWORD environment variable is required"
+        error "Set it with: export VM_ADMIN_PASSWORD='YourSecurePassword123!'"
+        errors=$((errors + 1))
+    elif [ ${#VM_ADMIN_PASSWORD} -lt 12 ]; then
+        error "VM_ADMIN_PASSWORD must be at least 12 characters"
+        errors=$((errors + 1))
+    fi
+
+    if [ $errors -gt 0 ]; then
+        error "$errors validation error(s) found. Aborting."
+        exit 1
+    fi
+
+    success "All inputs validated"
+}
+
 TIMESTAMP=$(date +%Y%m%d%H%M%S)
 DEPLOYMENT_NAME="alz-${ENV}-${TIMESTAMP}"
+
+# =============================================================================
+# Background Job Tracking
+# =============================================================================
+FAILED_JOBS=0
+declare -a BG_PIDS=()
+
+# Function to wait for background jobs and check status
+wait_for_jobs() {
+    local description="${1:-background jobs}"
+    local failed=0
+    for pid in "${BG_PIDS[@]}"; do
+        if ! wait "$pid" 2>/dev/null; then
+            failed=$((failed + 1))
+        fi
+    done
+    BG_PIDS=()
+    if [ $failed -gt 0 ]; then
+        error "$failed $description failed"
+        FAILED_JOBS=$((FAILED_JOBS + failed))
+        return 1
+    fi
+    return 0
+}
+
+# Cleanup function for rollback on failure
+cleanup_on_failure() {
+    if [ "$1" != "0" ]; then
+        warn "Deployment failed. Resources may need manual cleanup."
+        warn "Resource groups created: rg-hub-networking-${ENV}-${LOCATION}-001"
+        for i in $(seq 1 $SPOKE_COUNT); do
+            warn "  rg-spoke${i}-${ENV}-${LOCATION}-001"
+        done
+        warn "To delete all resources, run: ./destroy-local.sh $ENV $LOCATION"
+    fi
+}
+
+trap 'cleanup_on_failure $?' EXIT
 
 echo "=========================================="
 echo "ALZ-v3 Local Deployment"
@@ -29,6 +166,9 @@ echo "Bastion: $DEPLOY_BASTION"
 echo "Deployment: $DEPLOYMENT_NAME"
 echo "=========================================="
 
+# Run input validation FIRST
+validate_inputs
+
 # =============================================================================
 # Pre-Flight Checks
 # =============================================================================
@@ -38,17 +178,17 @@ echo "--------------------------"
 
 # Check Azure CLI
 if ! command -v az &> /dev/null; then
-    echo "ERROR: Azure CLI not found"
+    error "Azure CLI not found"
     exit 1
 fi
 
 # Check authentication
 if ! az account show &> /dev/null; then
-    echo "ERROR: Not authenticated. Run 'az login'"
+    error "Not authenticated. Run 'az login'"
     exit 1
 fi
 
-echo "Azure CLI authenticated"
+success "Azure CLI authenticated"
 
 # Shell detection
 if [ -n "$MSYSTEM" ]; then
@@ -364,10 +504,11 @@ for i in $(seq 1 $VM_COUNT_SPOKE1); do
         --vnet-name $SPOKE1_VNET \
         --subnet snet-workloads \
         --admin-username azureadmin \
-        --admin-password 'SecureP@ss2024!' \
+        --admin-password "$VM_ADMIN_PASSWORD" \
         --public-ip-address "" \
         --nsg "" \
         --no-wait &
+    BG_PIDS+=($!)
 done
 
 # Spoke2 VMs
@@ -385,14 +526,15 @@ for i in $(seq 1 $VM_COUNT_SPOKE2); do
         --vnet-name $SPOKE2_VNET \
         --subnet snet-domain-controllers \
         --admin-username azureadmin \
-        --admin-password 'SecureP@ss2024!' \
+        --admin-password "$VM_ADMIN_PASSWORD" \
         --public-ip-address "" \
         --nsg "" \
         --no-wait &
+    BG_PIDS+=($!)
 done
 
-wait
-echo "VM deployments started"
+wait_for_jobs "VM deployments" || warn "Some VMs may have failed to start"
+success "VM deployments initiated"
 
 echo "Waiting for VMs to provision..."
 sleep 120

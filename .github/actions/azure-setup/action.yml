@@ -1,0 +1,118 @@
+name: 'Azure Setup'
+description: 'Composite action for Azure CLI setup, login, and pre-flight checks'
+
+inputs:
+  azure_credentials:
+    description: 'Azure service principal credentials JSON'
+    required: true
+  location:
+    description: 'Azure region'
+    required: true
+    default: 'eastus'
+  check_providers:
+    description: 'Check and register Azure providers'
+    required: false
+    default: 'true'
+  check_quota:
+    description: 'Check VM quota availability'
+    required: false
+    default: 'true'
+
+outputs:
+  subscription_id:
+    description: 'Azure subscription ID'
+    value: ${{ steps.get-subscription.outputs.subscription_id }}
+  tenant_id:
+    description: 'Azure tenant ID'
+    value: ${{ steps.get-subscription.outputs.tenant_id }}
+  quota_status:
+    description: 'Quota check status'
+    value: ${{ steps.check-quota.outputs.status }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ inputs.azure_credentials }}
+
+    - name: Get Subscription Info
+      id: get-subscription
+      shell: bash
+      run: |
+        SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+        TENANT_ID=$(az account show --query tenantId -o tsv)
+        echo "subscription_id=${SUBSCRIPTION_ID}" >> $GITHUB_OUTPUT
+        echo "tenant_id=${TENANT_ID}" >> $GITHUB_OUTPUT
+        echo "Subscription: ${SUBSCRIPTION_ID}"
+        echo "Tenant: ${TENANT_ID}"
+
+    - name: Check Azure Providers
+      if: inputs.check_providers == 'true'
+      shell: bash
+      run: |
+        echo "Checking required Azure providers..."
+        PROVIDERS="Microsoft.Network Microsoft.Compute Microsoft.Storage Microsoft.OperationalInsights Microsoft.Web"
+
+        for provider in $PROVIDERS; do
+          status=$(az provider show --namespace $provider --query "registrationState" -o tsv 2>/dev/null || echo "NotRegistered")
+          if [ "$status" != "Registered" ]; then
+            echo "Registering $provider..."
+            az provider register --namespace $provider
+            # Don't wait - registration happens in background
+          else
+            echo "$provider: Already registered"
+          fi
+        done
+
+        echo "Provider check complete"
+
+    - name: Check VM Quota
+      id: check-quota
+      if: inputs.check_quota == 'true'
+      shell: bash
+      run: |
+        LOCATION="${{ inputs.location }}"
+        echo "Checking VM quota in $LOCATION..."
+
+        # Check B-series quota (for workload VMs)
+        B_INFO=$(az vm list-usage --location $LOCATION \
+          --query "[?contains(name.value, 'standardBSFamily')].{current:currentValue, limit:limit}" \
+          -o tsv 2>/dev/null || echo "N/A N/A")
+        B_CURRENT=$(echo $B_INFO | awk '{print $1}')
+        B_LIMIT=$(echo $B_INFO | awk '{print $2}')
+
+        # Check D-series quota (for DC VMs)
+        D_INFO=$(az vm list-usage --location $LOCATION \
+          --query "[?contains(name.value, 'standardDSv3Family')].{current:currentValue, limit:limit}" \
+          -o tsv 2>/dev/null || echo "N/A N/A")
+        D_CURRENT=$(echo $D_INFO | awk '{print $1}')
+        D_LIMIT=$(echo $D_INFO | awk '{print $2}')
+
+        echo "B-series: ${B_CURRENT}/${B_LIMIT} vCPUs"
+        echo "D-series: ${D_CURRENT}/${D_LIMIT} vCPUs"
+
+        # Basic quota validation
+        if [ "$B_LIMIT" != "N/A" ] && [ "$B_CURRENT" != "N/A" ]; then
+          AVAILABLE=$((B_LIMIT - B_CURRENT))
+          if [ $AVAILABLE -lt 4 ]; then
+            echo "::warning::Low B-series quota: only $AVAILABLE vCPUs available"
+            echo "status=warning" >> $GITHUB_OUTPUT
+          else
+            echo "status=ok" >> $GITHUB_OUTPUT
+          fi
+        else
+          echo "status=unknown" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Summary
+      shell: bash
+      run: |
+        echo "## Azure Setup Complete" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
+        echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Location | ${{ inputs.location }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Providers Checked | ${{ inputs.check_providers }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Quota Checked | ${{ inputs.check_quota }} |" >> $GITHUB_STEP_SUMMARY
