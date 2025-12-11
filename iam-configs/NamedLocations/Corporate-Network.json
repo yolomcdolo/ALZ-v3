@@ -1,0 +1,24 @@
+{
+    "@odata.type": "#microsoft.graph.ipNamedLocation",
+    "displayName": "Corporate-Network",
+    "isTrusted": true,
+    "ipRanges": [
+        {
+            "@odata.type": "#microsoft.graph.iPv4CidrRange",
+            "cidrAddress": "10.0.0.0/8"
+        },
+        {
+            "@odata.type": "#microsoft.graph.iPv4CidrRange",
+            "cidrAddress": "172.16.0.0/12"
+        },
+        {
+            "@odata.type": "#microsoft.graph.iPv4CidrRange",
+            "cidrAddress": "192.168.0.0/16"
+        }
+    ],
+    "_metadata": {
+        "description": "Internal corporate network ranges. Update with actual corporate IPs before deployment.",
+        "owner": "network-team",
+        "lastReviewed": "2024-01-01"
+    }
+}

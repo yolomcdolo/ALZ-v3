@@ -1,0 +1,339 @@
+name: Deploy IAM Configuration
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+        default: 'dev'
+      deployment_type:
+        description: 'What to deploy'
+        required: true
+        type: choice
+        options:
+          - all
+          - groups
+          - named-locations
+          - conditional-access
+          - service-principals
+        default: 'all'
+      ca_initial_state:
+        description: 'Conditional Access policy initial state (production MUST use report-only)'
+        required: true
+        type: choice
+        options:
+          - enabledForReportingButNotEnforced
+          - enabled
+          - disabled
+        default: 'enabledForReportingButNotEnforced'
+      whatif:
+        description: 'Run in What-If mode (preview only)'
+        required: false
+        type: boolean
+        default: true
+      config_path:
+        description: 'Path to configuration files (relative to repo root)'
+        required: false
+        type: string
+        default: 'iam-configs'
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  POWERSHELL_TELEMETRY_OPTOUT: 1
+
+jobs:
+  validate:
+    name: Validate Configuration
+    runs-on: ubuntu-latest
+    outputs:
+      config_valid: ${{ steps.validate.outputs.valid }}
+      config_count: ${{ steps.validate.outputs.count }}
+      risk_level: ${{ steps.risk.outputs.level }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Validate Configuration Files
+        id: validate
+        shell: pwsh
+        run: |
+          $configPath = "${{ github.workspace }}/${{ inputs.config_path }}"
+
+          if (-not (Test-Path $configPath)) {
+            Write-Error "Configuration path not found: $configPath"
+            echo "valid=false" >> $env:GITHUB_OUTPUT
+            exit 1
+          }
+
+          $jsonFiles = Get-ChildItem -Path $configPath -Filter "*.json" -Recurse
+          $validCount = 0
+          $errors = @()
+
+          foreach ($file in $jsonFiles) {
+            try {
+              $content = Get-Content $file.FullName -Raw
+              $json = $content | ConvertFrom-Json
+
+              # Validate CA policies have break-glass exclusions
+              if ($file.DirectoryName -match "ConditionalAccess") {
+                if (-not $json.conditions.users.excludeGroups) {
+                  $errors += "CRITICAL: $($file.Name) missing break-glass exclusions"
+                }
+              }
+
+              $validCount++
+            }
+            catch {
+              $errors += "Invalid JSON in $($file.Name): $($_.Exception.Message)"
+            }
+          }
+
+          if ($errors.Count -gt 0) {
+            foreach ($error in $errors) {
+              Write-Error $error
+            }
+            echo "valid=false" >> $env:GITHUB_OUTPUT
+            exit 1
+          }
+
+          Write-Host "Validated $validCount configuration files" -ForegroundColor Green
+          echo "valid=true" >> $env:GITHUB_OUTPUT
+          echo "count=$validCount" >> $env:GITHUB_OUTPUT
+
+      - name: Assess Risk Level
+        id: risk
+        shell: pwsh
+        run: |
+          $type = "${{ inputs.deployment_type }}"
+          $env = "${{ inputs.environment }}"
+          $caState = "${{ inputs.ca_initial_state }}"
+
+          # Calculate risk level
+          if ($type -eq "conditional-access" -and $env -eq "prod" -and $caState -eq "enabled") {
+            $riskLevel = "CRITICAL"
+          }
+          elseif ($type -eq "conditional-access" -and $env -eq "prod") {
+            $riskLevel = "HIGH"
+          }
+          elseif ($type -eq "conditional-access") {
+            $riskLevel = "MEDIUM"
+          }
+          else {
+            $riskLevel = "LOW"
+          }
+
+          Write-Host "Risk Level: $riskLevel" -ForegroundColor $(if ($riskLevel -eq "CRITICAL") { "Red" } else { "Yellow" })
+          echo "level=$riskLevel" >> $env:GITHUB_OUTPUT
+
+      - name: Validation Summary
+        run: |
+          echo "## Configuration Validation" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Valid**: ${{ steps.validate.outputs.valid }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **File Count**: ${{ steps.validate.outputs.count }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Risk Level**: ${{ steps.risk.outputs.level }}" >> $GITHUB_STEP_SUMMARY
+
+  # SECURITY GATE: Approval required for staging/prod
+  approve-staging:
+    name: Approve Staging Deployment
+    runs-on: ubuntu-latest
+    needs: validate
+    if: |
+      needs.validate.outputs.config_valid == 'true' &&
+      inputs.environment == 'staging' &&
+      inputs.whatif == false
+    environment:
+      name: staging
+      url: https://portal.azure.com
+
+    steps:
+      - name: Await Approval
+        run: |
+          echo "## Staging Approval Required" >> $GITHUB_STEP_SUMMARY
+          echo "Single approver must authorize this deployment" >> $GITHUB_STEP_SUMMARY
+
+  # SECURITY GATE: Multi-approval required for production
+  approve-production:
+    name: Approve Production Deployment
+    runs-on: ubuntu-latest
+    needs: validate
+    if: |
+      needs.validate.outputs.config_valid == 'true' &&
+      inputs.environment == 'prod' &&
+      inputs.whatif == false
+    environment:
+      name: prod
+      url: https://portal.azure.com
+
+    steps:
+      - name: Await Multi-Approval
+        run: |
+          echo "## Production Approval Required" >> $GITHUB_STEP_SUMMARY
+          echo "**CRITICAL**: 2+ approvers must authorize this deployment" >> $GITHUB_STEP_SUMMARY
+          echo "Risk Level: ${{ needs.validate.outputs.risk_level }}" >> $GITHUB_STEP_SUMMARY
+
+  deploy:
+    name: Deploy to ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    needs: [validate, approve-staging, approve-production]
+    if: |
+      always() &&
+      needs.validate.outputs.config_valid == 'true' &&
+      (needs.approve-staging.result == 'success' || needs.approve-staging.result == 'skipped') &&
+      (needs.approve-production.result == 'success' || needs.approve-production.result == 'skipped')
+    environment: ${{ inputs.environment }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup PowerShell
+        shell: pwsh
+        run: |
+          Write-Host "PowerShell Version: $($PSVersionTable.PSVersion)"
+
+      - name: Install Microsoft.Graph Modules
+        shell: pwsh
+        run: |
+          $modules = @(
+            'Microsoft.Graph.Authentication',
+            'Microsoft.Graph.Groups',
+            'Microsoft.Graph.Identity.SignIns',
+            'Microsoft.Graph.Applications'
+          )
+
+          foreach ($module in $modules) {
+            Write-Host "Installing $module..." -ForegroundColor Cyan
+            Install-Module -Name $module -Scope CurrentUser -Force -AllowClobber
+          }
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Connect to Microsoft Graph
+        shell: pwsh
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        run: |
+          # Use managed identity / federated credential from Azure login
+          $token = az account get-access-token --resource https://graph.microsoft.com --query accessToken -o tsv
+
+          # Connect using the access token
+          $secureToken = ConvertTo-SecureString $token -AsPlainText -Force
+          Connect-MgGraph -AccessToken $secureToken
+
+          $context = Get-MgContext
+          Write-Host "Connected to tenant: $($context.TenantId)" -ForegroundColor Green
+
+      - name: Production Safety Check
+        if: inputs.environment == 'prod' && inputs.ca_initial_state == 'enabled'
+        shell: pwsh
+        run: |
+          Write-Error "SECURITY VIOLATION: Production CA policies MUST deploy in report-only mode"
+          Write-Error "Set ca_initial_state to 'enabledForReportingButNotEnforced'"
+          exit 1
+
+      - name: Run IAM Deployment
+        id: deploy
+        shell: pwsh
+        run: |
+          $configPath = "${{ github.workspace }}/${{ inputs.config_path }}"
+          $scriptPath = "${{ github.workspace }}/scripts/iam/Deploy-IAMConfig.ps1"
+
+          # Build command parameters
+          $params = @{
+            ConfigPath = $configPath
+            CAInitialState = "${{ inputs.ca_initial_state }}"
+            Environment = "${{ inputs.environment }}"
+            GenerateReport = $true
+          }
+
+          # Add deployment type flag
+          $type = "${{ inputs.deployment_type }}"
+          switch ($type) {
+            "all" { $params.All = $true }
+            "groups" { $params.Groups = $true }
+            "named-locations" { $params.NamedLocations = $true }
+            "conditional-access" { $params.ConditionalAccess = $true }
+            "service-principals" { $params.ServicePrincipals = $true }
+          }
+
+          # Add WhatIf if specified
+          if ("${{ inputs.whatif }}" -eq "true") {
+            $params.WhatIf = $true
+          }
+
+          # Execute deployment
+          & $scriptPath @params
+
+      - name: Upload Deployment Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iam-deployment-report-${{ inputs.environment }}-${{ github.run_number }}
+          path: scripts/iam/deployment-report-*.md
+          if-no-files-found: ignore
+
+      - name: Upload Audit Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iam-audit-logs-${{ inputs.environment }}-${{ github.run_number }}
+          path: scripts/iam/logs/iam-audit.log
+          if-no-files-found: ignore
+
+      - name: Post Deployment Summary
+        if: always()
+        shell: pwsh
+        run: |
+          $reportFiles = Get-ChildItem -Path "${{ github.workspace }}/scripts/iam" -Filter "deployment-report-*.md" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+
+          if ($reportFiles) {
+            $report = Get-Content $reportFiles.FullName -Raw
+            echo "## IAM Deployment Report" >> $env:GITHUB_STEP_SUMMARY
+            echo "" >> $env:GITHUB_STEP_SUMMARY
+            echo $report >> $env:GITHUB_STEP_SUMMARY
+          }
+          else {
+            echo "## IAM Deployment Completed" >> $env:GITHUB_STEP_SUMMARY
+            echo "" >> $env:GITHUB_STEP_SUMMARY
+            echo "No detailed report generated." >> $env:GITHUB_STEP_SUMMARY
+          }
+
+  notify:
+    name: Notify
+    runs-on: ubuntu-latest
+    needs: [validate, deploy]
+    if: always()
+
+    steps:
+      - name: Deployment Status
+        run: |
+          echo "## IAM Deployment Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Step | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Validation | ${{ needs.validate.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deployment | ${{ needs.deploy.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment**: ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Type**: ${{ inputs.deployment_type }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **What-If**: ${{ inputs.whatif }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **CA State**: ${{ inputs.ca_initial_state }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Risk Level**: ${{ needs.validate.outputs.risk_level }}" >> $GITHUB_STEP_SUMMARY

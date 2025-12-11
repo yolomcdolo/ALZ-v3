@@ -1,0 +1,40 @@
+{
+    "displayName": "CA003-Require-Compliant-Device",
+    "state": "enabledForReportingButNotEnforced",
+    "conditions": {
+        "users": {
+            "includeUsers": ["All"],
+            "excludeGroups": [
+                "{{GroupId:CA-Exclusion-EmergencyAccess}}",
+                "{{GroupId:CA-Exclusion-BreakGlass}}",
+                "{{GroupId:CA-Exclusion-ServiceAccounts}}"
+            ]
+        },
+        "applications": {
+            "includeApplications": ["All"]
+        },
+        "platforms": {
+            "includePlatforms": ["all"],
+            "excludePlatforms": []
+        },
+        "clientAppTypes": [
+            "browser",
+            "mobileAppsAndDesktopClients"
+        ]
+    },
+    "grantControls": {
+        "operator": "OR",
+        "builtInControls": [
+            "compliantDevice",
+            "domainJoinedDevice"
+        ]
+    },
+    "_metadata": {
+        "description": "Requires devices to be compliant or hybrid Azure AD joined. Enforces device security posture.",
+        "category": "device-security",
+        "criticality": "high",
+        "owner": "security-team",
+        "lastReviewed": "2024-01-01",
+        "compliance": ["CIS", "NIST"]
+    }
+}

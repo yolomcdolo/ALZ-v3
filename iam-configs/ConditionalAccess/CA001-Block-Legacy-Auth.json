@@ -1,0 +1,32 @@
+{
+    "displayName": "CA001-Block-Legacy-Authentication",
+    "state": "enabledForReportingButNotEnforced",
+    "conditions": {
+        "users": {
+            "includeUsers": ["All"],
+            "excludeGroups": [
+                "{{GroupId:CA-Exclusion-EmergencyAccess}}",
+                "{{GroupId:CA-Exclusion-BreakGlass}}"
+            ]
+        },
+        "applications": {
+            "includeApplications": ["All"]
+        },
+        "clientAppTypes": [
+            "exchangeActiveSync",
+            "other"
+        ]
+    },
+    "grantControls": {
+        "operator": "OR",
+        "builtInControls": ["block"]
+    },
+    "_metadata": {
+        "description": "Blocks legacy authentication protocols that cannot support MFA. Critical security baseline policy.",
+        "category": "security-baseline",
+        "criticality": "critical",
+        "owner": "security-team",
+        "lastReviewed": "2024-01-01",
+        "compliance": ["CIS", "NIST"]
+    }
+}

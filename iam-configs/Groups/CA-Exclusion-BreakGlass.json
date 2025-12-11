@@ -1,0 +1,14 @@
+{
+    "displayName": "CA-Exclusion-BreakGlass",
+    "description": "Secondary break-glass group for emergency access. Contains dedicated break-glass accounts with FIDO2 keys. Monitor all sign-ins from this group.",
+    "mailEnabled": false,
+    "securityEnabled": true,
+    "groupTypes": [],
+    "_metadata": {
+        "category": "break-glass",
+        "criticality": "critical",
+        "owner": "security-team",
+        "lastReviewed": "2024-01-01",
+        "alertOnSignIn": true
+    }
+}

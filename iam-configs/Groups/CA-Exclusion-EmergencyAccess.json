@@ -1,0 +1,13 @@
+{
+    "displayName": "CA-Exclusion-EmergencyAccess",
+    "description": "Emergency access accounts excluded from all Conditional Access policies. Contains break-glass accounts for emergency tenant access. CRITICAL: Never remove this group from CA exclusions.",
+    "mailEnabled": false,
+    "securityEnabled": true,
+    "groupTypes": [],
+    "_metadata": {
+        "category": "break-glass",
+        "criticality": "critical",
+        "owner": "security-team",
+        "lastReviewed": "2024-01-01"
+    }
+}

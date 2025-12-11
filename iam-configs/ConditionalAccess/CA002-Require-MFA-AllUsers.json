@@ -1,0 +1,33 @@
+{
+    "displayName": "CA002-Require-MFA-AllUsers",
+    "state": "enabledForReportingButNotEnforced",
+    "conditions": {
+        "users": {
+            "includeUsers": ["All"],
+            "excludeGroups": [
+                "{{GroupId:CA-Exclusion-EmergencyAccess}}",
+                "{{GroupId:CA-Exclusion-BreakGlass}}",
+                "{{GroupId:CA-Exclusion-ServiceAccounts}}"
+            ]
+        },
+        "applications": {
+            "includeApplications": ["All"]
+        },
+        "clientAppTypes": [
+            "browser",
+            "mobileAppsAndDesktopClients"
+        ]
+    },
+    "grantControls": {
+        "operator": "OR",
+        "builtInControls": ["mfa"]
+    },
+    "_metadata": {
+        "description": "Requires MFA for all users accessing any application. Core identity protection policy.",
+        "category": "identity-protection",
+        "criticality": "critical",
+        "owner": "security-team",
+        "lastReviewed": "2024-01-01",
+        "compliance": ["CIS", "NIST", "SOC2"]
+    }
+}
